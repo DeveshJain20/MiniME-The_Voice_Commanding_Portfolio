@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MINIme &#8212; Devesh Jain's Voice Portfolio</title>
+  <meta name="description" content="Talk to MINIme, Devesh Jain's voice-controlled portfolio assistant." />
+
+  <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+  <div class="grid-overlay" aria-hidden="true"></div>
+
+  <!-- GATE: every visitor lands here first. First tap anywhere starts
+       listening immediately (a click is required before any browser will
+       allow microphone access &#8212; see README for why). Typing is always
+       available right away too. -->
+  <section class="gate" id="gateScreen">
+    <div class="gate__inner">
+      <span class="gate__logo">MINI<span class="accent">me</span></span>
+      <h1>Say &ldquo;Hey MINIme&rdquo; to begin.</h1>
+      <p class="gate__hint">Tap anywhere to start listening, then say it &#8212; or type instead.</p>
+
+      <div class="gate__mic-wrap">
+        <div class="gate__mic-icon" id="gateMicIcon" aria-hidden="true">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+            <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" stroke="currentColor" stroke-width="2"/>
+            <path d="M19 11a7 7 0 0 1-14 0M12 18v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+      </div>
+      <p class="gate__status" id="gateStatus">Tap anywhere to start</p>
+
+      <form class="type-fallback gate__type" id="gateTypeForm">
+        <input type="text" id="gateTypeInput" placeholder="Or type: hey MINIme" autocomplete="off" />
+        <button type="submit">Enter</button>
+      </form>
+      <p class="gate__error" id="gateError" hidden></p>
+    </div>
+  </section>
+
+  <!-- MAIN APP: hidden until the gate above is passed -->
+  <div id="appRoot" hidden>
+    <header class="topbar">
+      <span class="topbar__logo">MINI<span class="accent">me</span></span>
+      <span class="topbar__tagline">Devesh Jain's voice assistant</span>
+
+      <div class="topbar__tools">
+        <button type="button" class="tool-btn" id="muteBtn" aria-pressed="false">Voice on</button>
+        <details class="settings">
+          <summary class="tool-btn">Voice settings</summary>
+          <div class="settings__panel">
+            <label>Voice
+              <select id="voiceSelect"><option value="">Automatic</option></select>
+            </label>
+            <label>Speed
+              <select id="rateSelect">
+                <option value="0.85">Slower</option>
+                <option value="1.05" selected>Normal</option>
+                <option value="1.25">Faster</option>
+                <option value="1.45">Fastest</option>
+              </select>
+            </label>
+            <p class="settings__note">Pick any voice installed on your device. Headphones stop MINIme from hearing herself.</p>
+          </div>
+        </details>
+      </div>
+    </header>
+
+    <main class="stage">
+
+      <!-- First screen after the gate: how do you want to explore? -->
+      <section class="welcome" id="welcomeState">
+        <p class="eyebrow">Devesh Jain's resume, by voice</p>
+        <h1>How would you like to explore?</h1>
+        <p class="welcome__hint">
+          Say <em>&ldquo;explore&rdquo;</em> or <em>&ldquo;tell me everything&rdquo;</em> &mdash; or just tap a choice.
+        </p>
+        <div class="choice-row">
+          <button type="button" class="choice" id="choiceExplore">
+            <strong>I'll explore myself</strong>
+            <span>Browse each section at your own pace</span>
+          </button>
+          <button type="button" class="choice choice--primary" id="choiceTour">
+            <strong>Tell me everything</strong>
+            <span>MINIme narrates the whole resume</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Mic + status -->
+      <div class="mic-area">
+        <button class="mic-btn" id="micBtn" aria-label="Turn listening on or off" type="button">
+          <span class="mic-btn__pulse" aria-hidden="true"></span>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" stroke="currentColor" stroke-width="2"/>
+            <path d="M19 11a7 7 0 0 1-14 0M12 18v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <p class="mic-status" id="micStatus">Tap to talk</p>
+        <p class="mic-fallback" id="micFallback" hidden>
+          Voice recognition isn't supported in this browser, so typing is on.
+        </p>
+      </div>
+
+      <!-- What was heard (updates live while you speak) -->
+      <p class="transcript" id="transcript" aria-live="polite"></p>
+
+      <button type="button" class="link-btn" id="typeToggle">Type instead</button>
+      <form class="type-fallback" id="typeForm" hidden>
+        <input type="text" id="typeInput" placeholder="Ask anything about Devesh's resume" autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+
+      <!-- Section bar: jump anywhere, any time -->
+      <nav class="section-nav" id="sectionNav" hidden aria-label="Resume sections"></nav>
+
+      <!-- Tour controls (only while the full walkthrough runs) -->
+      <div class="tour-bar" id="tourBar" hidden>
+        <div class="tour-bar__row">
+          <button type="button" class="mini-btn" id="tourBackBtn">Back</button>
+          <span class="tour-bar__label" id="tourProgress"></span>
+          <button type="button" class="mini-btn" id="tourPauseBtn">Pause</button>
+          <button type="button" class="mini-btn" id="tourSkipBtn">Skip</button>
+          <button type="button" class="mini-btn" id="tourStopBtn">Stop</button>
+        </div>
+        <div class="tour-bar__track"><div class="tour-bar__fill" id="tourFill"></div></div>
+        <p class="tour-bar__hint">You can also say &ldquo;skip&rdquo;, &ldquo;back&rdquo;, &ldquo;pause&rdquo; or &ldquo;stop&rdquo;.</p>
+      </div>
+
+      <!-- Response panel: MINIme's words (as text) + the matching content -->
+      <section class="response-panel" id="responsePanel" hidden aria-live="polite">
+        <div class="response-panel__caption" id="captionText"></div>
+        <div class="response-panel__body" id="panelBody"></div>
+        <div class="chips" id="chips"></div>
+      </section>
+
+    </main>
+
+    <footer class="foot-note">
+      <span id="aiStatusNote"></span>
+      <span>Esc stops MINIme &middot; Space turns the mic on or off &middot; Headphones work best</span>
+    </footer>
+  </div>
+
+  <script src="/static/js/content.js"></script>
+  <script src="/static/js/intents.js"></script>
+  <script src="/static/js/main.js"></script>
+  <script src="/static/js/gate.js"></script>
+</body>
+</html>
