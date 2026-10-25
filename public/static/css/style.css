@@ -759,3 +759,50 @@ a { color: inherit; }
 #appRoot.is-compact .tour-bar { margin-top: 10px; }
 #appRoot.is-compact .response-panel { margin-top: 16px; }
 #appRoot.is-compact .response-panel__caption { margin-bottom: 22px; }
+
+/* -- Siri-like ring around the mic (listening, hearing you, speaking) -- */
+.mic-btn::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, #6E7BFF, #5EEAD4, #FF7AD9, #6E7BFF);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  opacity: 0;
+  transition: opacity 250ms var(--ease);
+  animation: ring-spin 3.2s linear infinite;
+  pointer-events: none;
+}
+.mic-btn.is-listening::after, .mic-btn.is-speaking::after, .mic-btn.is-processing::after { opacity: 0.85; }
+.mic-btn.is-speaking::after { animation-duration: 1.8s; }
+.mic-btn.is-hearing::after { opacity: 1; animation-duration: 0.9s; }
+.mic-btn.is-hearing { transform: scale(1.06); }
+@keyframes ring-spin { to { transform: rotate(360deg); } }
+
+/* Safari/iPhone: a gentle "tap me" pulse */
+.mic-btn.needs-tap { animation: tap-nudge 1.8s ease-in-out infinite; }
+@keyframes tap-nudge {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(110,123,255,0.3), 0 12px 40px rgba(110, 123, 255, 0.25); }
+  50% { box-shadow: 0 0 0 8px rgba(110,123,255,0.22), 0 12px 40px rgba(110, 123, 255, 0.45); }
+}
+
+/* Browser-support notice */
+.compat {
+  width: 100%;
+  margin: 8px 0 18px;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 193, 94, 0.35);
+  background: rgba(255, 193, 94, 0.08);
+  border-radius: var(--radius-lg);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-ink-muted);
+  text-align: left;
+}
+
+/* Voice settings: headphones switch */
+.settings__panel .settings__check { flex-direction: row; align-items: flex-start; gap: 10px; cursor: pointer; }
+.settings__check input { margin-top: 3px; accent-color: var(--color-accent); }
+.settings__check span { display: flex; flex-direction: column; gap: 2px; color: var(--color-ink); font-size: 13px; }
+.settings__check small { font-size: 11px; line-height: 1.5; color: var(--color-ink-faint); }

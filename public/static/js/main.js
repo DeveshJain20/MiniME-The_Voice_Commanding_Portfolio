@@ -36,11 +36,19 @@
   const rateSelect = $("rateSelect");
 
   /* -- Environment -- */
-  const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  // Desktop browsers keep the mic open continuously. Phones play a system
-  // "ding" on every restart and pick up their own speaker, so there the mic
-  // pauses while MINIme talks and is only re-opened after she finishes.
-  const RESTART_ON_SILENCE = !IS_MOBILE;
+  const UA = navigator.userAgent;
+  const IS_IOS = /iPhone|iPad|iPod/i.test(UA) || (/Macintosh/i.test(UA) && navigator.maxTouchPoints > 1);
+  const IS_ANDROID = /Android/i.test(UA);
+  const IS_MOBILE = IS_IOS || IS_ANDROID;
+  // Every iPhone/iPad browser is WebKit underneath, so they all behave like Safari.
+  const IS_SAFARI = IS_IOS || /^((?!chrome|chromium|crios|fxios|edg|opr|android).)*safari/i.test(UA);
+  const IS_FIREFOX = /firefox|fxios/i.test(UA);
+  // Safari/iPhone only let the mic start from a tap, so there she asks for a tap after
+  // each answer. Chrome, Edge and Android can keep listening on their own.
+  const NEEDS_TAP = IS_SAFARI;
+  // Phones and Safari pause the mic while she talks (system "ding", and she would hear herself).
+  const PAUSE_WHILE_SPEAKING = IS_MOBILE || NEEDS_TAP;
+  const RESTART_ON_SILENCE = !IS_MOBILE && !NEEDS_TAP;
   const REC_LANG = /^en/i.test(navigator.language || "") ? navigator.language : "en-US";
   // With a hosted PDF the buttons open/download it; otherwise they open the
   // HTML copy of the resume (resume.html), which prints or saves as a PDF.
@@ -72,6 +80,7 @@
     muted: !!store.get("muted", false),
     rate: Number(store.get("rate", 1.05)) || 1.05,
     voiceName: store.get("voice", ""),
+    headphones: !!store.get("headphones", false),
   };
   const tour = { active: false, paused: false, index: -1, resumeIndex: -1 };
 
@@ -85,6 +94,12 @@
   let restartTimer = null;
   let interimTimer = null;
   let errorStreak = 0;
+  let silenceStreak = 0;
+  let gotStart = false;
+  let startWatchdog = null;
+  let watchdogResets = 0;
+  let micGranted = false;        // set once the browser has really opened the mic
+  let tapArmedUntil = 0;         // right after a tap on the mic, whatever you say is for her
 
   // Speech state
   const synth = "speechSynthesis" in window ? window.speechSynthesis : null;
@@ -101,6 +116,7 @@
     micBtn.classList.toggle("is-listening", next === "listening");
     micBtn.classList.toggle("is-speaking", next === "speaking");
     micBtn.classList.toggle("is-processing", next === "processing");
+    if (next !== "idle") micBtn.classList.remove("needs-tap");
     const labels = {
       idle: "Tap to talk",
       listening: "Listening \u2014 say \u201cHey MINIme\u201d",
@@ -110,6 +126,15 @@
     micStatus.textContent = labels[next];
   }
   function idleStatus() { setStatus(alwaysOn ? "listening" : "idle"); }
+
+  // A short message under the mic (permission problems, "tap to answer"...).
+  function hint(msg) { micStatus.textContent = msg; }
+  // Safari/iPhone can only open the mic from a tap, so after each answer the
+  // mic button gently pulses to say "tap me".
+  function setNudge(on, msg) {
+    micBtn.classList.toggle("needs-tap", !!on);
+    if (on) hint(msg || "Tap the mic to answer");
+  }
 
   function showTranscript(text) {
     transcriptEl.classList.remove("is-live");
@@ -192,7 +217,9 @@
     const chunks = [];
     let cur = "";
     for (const u of units) {
-      if (cur && (cur + " " + u).length > 170) { chunks.push(cur); cur = u; }
+      // The first piece is kept short so she starts talking sooner.
+      const limit = chunks.length === 0 ? 105 : 170;
+      if (cur && (cur + " " + u).length > limit) { chunks.push(cur); cur = u; }
       else cur = cur ? cur + " " + u : u;
     }
     if (cur) chunks.push(cur);
@@ -205,29 +232,37 @@
   }
 
   /* -- Voice picking -- */
+  // Best first. The most natural versions ("Natural", "Neural", "Premium",
+  // "Enhanced") are preferred automatically. Siri-like Apple voices (Ava,
+  // Samantha...) rank high on iPhone and Mac; the "Natural" Aria, Jenny and
+  // Neerja voices are the best on Microsoft Edge.
   const FEMALE_HINTS = [
-    "neerja", "aria", "jenny", "zira", "heera", "samantha", "veena", "karen", "moira",
-    "tessa", "serena", "fiona", "google uk english female", "female", "susan", "hazel",
-    "catherine", "google us english",
+    "aria", "jenny", "neerja", "ava", "samantha", "allison", "zoe", "nicky", "sonia", "libby",
+    "zira", "heera", "veena", "karen", "moira", "tessa", "serena", "fiona", "susan", "hazel",
+    "catherine", "google uk english female", "female", "google us english",
   ];
-  const MALE_RE = /\b(david|mark|george|james|ravi|prabhat|hemant|guy|ryan|daniel|fred|male|alex|thomas|rishi)\b/i;
+  const MALE_RE = /\b(david|mark|george|james|ravi|prabhat|hemant|guy|ryan|daniel|fred|male|alex|thomas|rishi|eric|davis|brian|christopher)\b/i;
+  const QUALITY_RE = /natural|neural|premium|enhanced|online/i;
   let chosenVoice = null;
   let voiceIsAuto = true;
 
+  function hintIndex(name) {
+    return FEMALE_HINTS.findIndex((h) => new RegExp("\\b" + h.replace(/ /g, "\\s") + "\\b", "i").test(name));
+  }
   function looksFemale(v) {
-    return !!v && FEMALE_HINTS.some((h) => v.name.toLowerCase().includes(h));
+    return !!v && hintIndex(v.name) >= 0 && !MALE_RE.test(v.name);
   }
   function autoVoice(list) {
     const locale = (navigator.language || "en-US").toLowerCase();
     const score = (v) => {
-      const n = v.name.toLowerCase();
       let s = 0;
-      const idx = FEMALE_HINTS.findIndex((h) => n.includes(h));
-      if (idx >= 0) s += 100 - idx;
-      if (/natural|neural|online/.test(n)) s += 20;
-      if (v.lang.toLowerCase() === locale) s += 10;
-      else if (v.lang.toLowerCase().startsWith(locale.slice(0, 2))) s += 3;
-      if (MALE_RE.test(n)) s -= 80;
+      const idx = hintIndex(v.name);
+      if (idx >= 0) s += 100 - idx * 2;
+      if (QUALITY_RE.test(v.name)) s += 30;
+      const lang = v.lang.toLowerCase().replace("_", "-");
+      if (lang === locale) s += 12;
+      else if (lang.startsWith(locale.slice(0, 2))) s += 4;
+      if (MALE_RE.test(v.name)) s -= 90;
       return s;
     };
     return list.slice().sort((a, b) => score(b) - score(a))[0] || null;
@@ -250,7 +285,28 @@
     loadVoices();
     if (synth.addEventListener) synth.addEventListener("voiceschanged", loadVoices);
     else synth.onvoiceschanged = loadVoices;
+    // Safari often reports an empty voice list at first and never says when it fills in.
+    if (!chosenVoice) {
+      let tries = 0;
+      const poll = setInterval(() => {
+        loadVoices();
+        if (chosenVoice || ++tries > 24) clearInterval(poll);
+      }, 250);
+    }
   }
+
+  // iPhone/iPad/Safari only let a page speak after a tap. On the very first
+  // tap (or key press) anywhere, speak a silent word to unlock the speech engine.
+  function unlockSpeech() {
+    if (!synth) return;
+    try {
+      const u = new SpeechSynthesisUtterance(" ");
+      u.volume = 0;
+      synth.speak(u);
+    } catch (e) { /* not available */ }
+  }
+  document.addEventListener("pointerdown", unlockSpeech, { once: true });
+  document.addEventListener("keydown", unlockSpeech, { once: true });
 
   /* -- speak / stop -- */
   function speak(text, opts) {
@@ -273,6 +329,8 @@
       if (suspendedForSpeech) {
         suspendedForSpeech = false;
         if (alwaysOn) startListening();
+      } else if (NEEDS_TAP && recognition && !tour.active && !running) {
+        setNudge(true); // Safari/iPhone: the mic opens only from a tap
       }
       if (opts.onEnd) opts.onEnd();
     };
@@ -288,8 +346,9 @@
     const chunks = chunkText(text);
     captionText.textContent = opts.caption != null ? opts.caption : tidy(chunks[0]);
 
-    if (IS_MOBILE && running) {
-      suspendedForSpeech = true;
+    if (PAUSE_WHILE_SPEAKING && running) {
+      if (NEEDS_TAP) alwaysOn = false; // Safari/iPhone can't reopen the mic on their own
+      else suspendedForSpeech = true;
       try { recognition.abort(); } catch (e) { /* already closed */ }
       running = false;
     }
@@ -304,8 +363,10 @@
         if (chosenVoice) u.voice = chosenVoice;
         u.lang = (chosenVoice && chosenVoice.lang) || REC_LANG;
         u.rate = state.rate;
-        // Only nudge the pitch up when the automatic pick isn't a known female voice.
-        u.pitch = voiceIsAuto && !looksFemale(chosenVoice) ? 1.2 : 1.0;
+        // Natural voices sound best untouched. Standard voices get a small lift for a
+        // brighter, friendlier tone (more if the pick isn't a known female voice).
+        const natural = !!chosenVoice && QUALITY_RE.test(chosenVoice.name);
+        u.pitch = natural ? 1.0 : voiceIsAuto && !looksFemale(chosenVoice) ? 1.2 : 1.1;
         u.onstart = () => {
           if (myToken === speechToken && opts.caption == null) captionText.textContent = tidy(chunk);
         };
@@ -936,13 +997,23 @@
     const skill = findSkill(n);
     const skillQ = !!skill && isSkillQuestion(n);
 
+    // Right after you tap the mic, whatever you say is meant for her.
+    const armed = source === "voice" && Date.now() < tapArmedUntil;
+    if (source === "voice") tapArmedUntil = 0;
+
     // With the mic always open, ignore room chatter: act only on clear
     // commands, generic words only mid-conversation, anything after "Hey MINIme".
-    if (source === "voice" && alwaysOn && !wake && !state.awaiting) {
-      const inConversation = tour.active || speaking || Date.now() - lastSpeechEnd < 20000;
-      const okIntent = m.strong && (!CONTEXTUAL_INTENTS.has(m.intent) || inConversation);
+    if (source === "voice" && alwaysOn && !NEEDS_TAP && !armed && !wake && !state.awaiting) {
+      const sinceSpoke = Date.now() - lastSpeechEnd;
+      const inConversation = tour.active || speaking || sinceSpoke < 20000;
+      const okIntent = m.strong
+        ? (!CONTEXTUAL_INTENTS.has(m.intent) || inConversation)
+        : (inConversation && m.confident);
       const skillMiss = isSkillQuestion(n) && !!extractSkillTerm(n) && /\b(he|his|him|devesh)\b|^(do|does|can) you\b/.test(n);
-      if (!okIntent && !skillQ && !skillMiss) {
+      // Right after she answered, a real sentence is almost certainly meant for her,
+      // even if it isn't something she knows: answer instead of staying silent.
+      const addressedToHer = (speaking || sinceSpoke < 12000) && n.split(" ").length >= 3 && !looksLikeEcho(raw);
+      if (!okIntent && !skillQ && !skillMiss && !addressedToHer) {
         transcriptEl.classList.add("is-live");
         transcriptEl.textContent = "\u201c" + raw + "\u201d \u2014 say \u201cHey MINIme\u201d first if that was for me";
         return;
@@ -1000,20 +1071,44 @@
      == */
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-  function startListening() {
+  function armStartWatchdog() {
+    clearTimeout(startWatchdog);
+    if (!micGranted) return; // a permission prompt may be on screen: don't interrupt it
+    startWatchdog = setTimeout(() => {
+      if (!running || gotStart) return;
+      // The browser accepted start() but the mic never opened. Recycle the session.
+      watchdogResets++;
+      try { recognition.abort(); } catch (e) { /* already closed */ }
+      running = false;
+      if (alwaysOn && !NEEDS_TAP && watchdogResets <= 3) {
+        restartTimer = setTimeout(startListening, 300);
+      } else {
+        alwaysOn = false;
+        setStatus("idle");
+        hint("The microphone didn't start \u2014 tap the mic to try again.");
+      }
+    }, 3500);
+  }
+
+  // fromTap is true when called straight from a tap (required on Safari/iPhone).
+  function startListening(fromTap) {
     if (!recognition) return;
+    if (NEEDS_TAP && fromTap !== true) { if (!running && !speaking) setNudge(true); return; }
     alwaysOn = true;
+    setNudge(false);
     clearTimeout(restartTimer);
     // Phones: wait until she has finished talking; finish() re-opens the mic.
-    if (IS_MOBILE && speaking) { suspendedForSpeech = true; return; }
+    if (PAUSE_WHILE_SPEAKING && speaking) { suspendedForSpeech = true; return; }
     if (running) { if (state.current === "idle") setStatus("listening"); return; }
     try {
+      gotStart = false;
       recognition.start();
       running = true;
       heardSomething = false;
+      armStartWatchdog();
       if (state.current === "idle") setStatus("listening");
     } catch (e) {
-      restartTimer = setTimeout(startListening, 300); // previous session still closing
+      restartTimer = setTimeout(() => startListening(fromTap), 300); // previous session still closing
     }
   }
 
@@ -1022,19 +1117,33 @@
     suspendedForSpeech = false;
     clearTimeout(restartTimer);
     clearTimeout(interimTimer);
+    clearTimeout(startWatchdog);
     if (recognition) { try { recognition.abort(); } catch (e) { /* already closed */ } }
     running = false;
     if (state.current === "listening") setStatus("idle");
   }
 
+  // Is this just her own voice, picked up again by the mic?
+  function looksLikeEcho(text) {
+    if (!speaking && Date.now() - lastSpeechEnd > 1200) return false;
+    const heard = cleanText(text).split(" ").filter(Boolean);
+    if (!heard.length) return true;
+    const said = new Set(cleanText(lastSpoken).split(" "));
+    const hits = heard.filter((w) => said.has(w)).length;
+    return heard.length >= 3 ? hits / heard.length >= 0.6 : hits === heard.length;
+  }
+
   // While she's talking (or has only just finished), her own voice can leak
-  // back into the mic. Only controls like "stop"/"skip", or "Hey MINIme",
-  // are accepted during that window.
+  // back into the mic. Anything that clearly isn't her own words is accepted,
+  // so you can interrupt her with a new question at any time. With headphones
+  // on, there is nothing to filter at all.
   function acceptable(text) {
-    const m = matchIntent(text);
     const justSpoke = Date.now() - lastSpeechEnd < 700;
-    if (speaking || justSpoke) return hasWake(text) || (m.strong && TOUR_CONTROLS.has(m.intent));
-    return true;
+    if (!speaking && !justSpoke) return true;
+    if (state.headphones || hasWake(text)) return true;
+    const m = matchIntent(text);
+    if (m.strong && TOUR_CONTROLS.has(m.intent)) return true;
+    return m.strong && !looksLikeEcho(text);
   }
 
   // Fast path: once a clear command has been spoken and the words stop
@@ -1049,7 +1158,7 @@
       committed = true;
       try { recognition.abort(); } catch (e) { /* already closed */ }
       handleTranscript(text, { source: "voice" });
-    }, 650);
+    }, 500);
   }
 
   if (SpeechRecognitionCtor) {
@@ -1059,10 +1168,22 @@
     recognition.continuous = false;
     recognition.maxAlternatives = 1;
 
-    recognition.onstart = () => { committed = false; heardSomething = false; };
+    recognition.onstart = () => {
+      gotStart = true;
+      micGranted = true;
+      watchdogResets = 0;
+      clearTimeout(startWatchdog);
+      committed = false;
+      heardSomething = false;
+    };
+    recognition.onaudiostart = () => { gotStart = true; clearTimeout(startWatchdog); };
+    // A little glow while she can actually hear you speaking.
+    recognition.onspeechstart = () => { silenceStreak = 0; micBtn.classList.add("is-hearing"); };
+    recognition.onspeechend = () => { micBtn.classList.remove("is-hearing"); };
 
     recognition.onresult = (event) => {
       errorStreak = 0;
+      silenceStreak = 0;
       heardSomething = true;
       const res = event.results[event.results.length - 1];
       const text = res[0].transcript;
@@ -1079,46 +1200,73 @@
 
     recognition.onerror = (event) => {
       running = false;
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      clearTimeout(startWatchdog);
+      micBtn.classList.remove("is-hearing");
+      const err = event.error;
+      if (err === "aborted") return;
+      if (err === "no-speech") {
+        silenceStreak++;
+        if (silenceStreak >= 3 && !NEEDS_TAP) hint("I can't hear anything \u2014 check your microphone isn't muted and is the one your browser is using.");
+        return; // onend follows and the mic reopens
+      }
+      if (err === "not-allowed" || err === "service-not-allowed") {
         alwaysOn = false;
         setStatus("idle");
-        micStatus.textContent = "Microphone access denied \u2014 check your browser permissions.";
+        hint(IS_SAFARI
+          ? "Safari needs permission \u2014 allow the microphone for this site, turn on Dictation in System Settings \u2192 Keyboard, then tap the mic again."
+          : "The microphone is blocked \u2014 click the lock icon in the address bar, allow the microphone, then tap the mic.");
         return;
       }
-      if (event.error === "network") {
-        errorStreak++;
-        if (errorStreak >= 3) {
-          alwaysOn = false;
-          setStatus("idle");
-          micStatus.textContent = "Voice service unreachable \u2014 tap the mic to retry, or type.";
-        }
+      if (err === "audio-capture") {
+        alwaysOn = false;
+        setStatus("idle");
+        hint("No microphone found \u2014 plug one in, or choose it in your browser or system sound settings.");
+        return;
       }
-      // "no-speech" / "aborted": onend fires next and the mic reopens.
+      if (err === "network") {
+        errorStreak++;
+        hint("The browser's speech service isn't reachable (Brave and some privacy settings block it). Tap the mic to retry, or type.");
+        if (errorStreak >= 3) { alwaysOn = false; setStatus("idle"); }
+      }
     };
 
     recognition.onend = () => {
       running = false;
       clearTimeout(interimTimer);
+      clearTimeout(startWatchdog);
+      micBtn.classList.remove("is-hearing");
       if (!alwaysOn) { if (state.current === "listening") setStatus("idle"); return; }
       if (suspendedForSpeech) return; // finish() reopens the mic after she speaks
+      if (NEEDS_TAP) {
+        // Safari/iPhone: one tap = one question. Ask for the next tap.
+        alwaysOn = false;
+        if (!speaking) {
+          setStatus("idle");
+          if (!heardSomething) setNudge(true, "Didn't catch that \u2014 tap the mic and try again");
+        }
+        return;
+      }
       if (RESTART_ON_SILENCE || heardSomething) {
         restartTimer = setTimeout(startListening, 250 + errorStreak * 500);
         return;
       }
-      alwaysOn = false; // phones: nothing heard \u2192 back to tap-to-talk
+      alwaysOn = false; // phones: nothing heard, back to tap-to-talk
       setStatus("idle");
     };
 
     // Tap the mic: interrupts her if she's talking, otherwise toggles listening.
     micBtn.addEventListener("click", () => {
+      setNudge(false);
       if (speaking) {
         if (tour.active && !tour.paused) tourPause();
         else stopSpeaking();
-        startListening();
+        tapArmedUntil = Date.now() + 10000;
+        startListening(true);
         return;
       }
-      if (alwaysOn) stopListening();
-      else startListening();
+      if (running || (alwaysOn && !NEEDS_TAP)) { stopListening(); return; }
+      tapArmedUntil = Date.now() + 10000;
+      startListening(true);
     });
   } else {
     micFallback.hidden = false;
@@ -1126,6 +1274,13 @@
     micStatus.textContent = "Voice not supported here";
     typeForm.hidden = false;
     typeToggle.hidden = true;
+    const where = IS_FIREFOX ? "Firefox" : IS_IOS ? "this iPhone/iPad browser" : "this browser";
+    const banner = document.createElement("div");
+    banner.className = "compat";
+    banner.setAttribute("role", "note");
+    banner.textContent = "Talking to MINIme isn't supported in " + where + ". You can still tap the buttons or type your question, and she will still speak her answers. To talk to her, open this page in " + (IS_IOS ? "Safari" : "Chrome, Edge or Safari") + ".";
+    const stage = document.querySelector(".stage");
+    if (stage) stage.insertBefore(banner, stage.firstChild);
   }
 
   /* ==
@@ -1200,6 +1355,33 @@
   rateSelect.value = String(state.rate);
   setMuted(state.muted);
   setActiveNav(null);
+
+  // Know when the mic permission is already granted (the start-watchdog relies on it).
+  if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: "microphone" }).then((perm) => {
+      micGranted = perm.state === "granted";
+      perm.onchange = () => { micGranted = perm.state === "granted"; };
+    }).catch(() => { /* not supported (Safari, Firefox) */ });
+  }
+
+  // Settings extras: a headphones switch and a tip for the most natural voice.
+  (function extendSettings() {
+    const panel = document.querySelector(".settings__panel");
+    if (!panel) return;
+    const note = panel.querySelector(".settings__note");
+    const row = document.createElement("label");
+    row.className = "settings__check";
+    row.innerHTML = `<input type="checkbox" id="headphonesChk"><span>I'm using headphones<small>She keeps listening while she talks, so you can interrupt her any time.</small></span>`;
+    panel.insertBefore(row, note);
+    const chk = row.querySelector("input");
+    chk.checked = state.headphones;
+    chk.addEventListener("change", () => { state.headphones = chk.checked; store.set("headphones", chk.checked); });
+    if (note) {
+      note.textContent = IS_IOS || /Macintosh/i.test(UA)
+        ? "For the most natural voice, download a Premium voice: Settings \u2192 Accessibility \u2192 Spoken Content \u2192 Voices, then pick it above."
+        : "For the most natural voice, open this page in Microsoft Edge: its \u201cNatural\u201d voices (Aria, Jenny, Neerja) sound very human. Pick any voice above.";
+    }
+  })();
 
   /* -- Gate hand-off -- */
   // Called by gate.js once the visitor has said or typed something on the

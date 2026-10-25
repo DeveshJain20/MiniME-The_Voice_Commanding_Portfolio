@@ -13,11 +13,19 @@
   // visitor's own locale than with a hard-coded en-US.
   const REC_LANG = /^en/i.test(navigator.language || "") ? navigator.language : "en-US";
 
+  const UA = navigator.userAgent;
+  const IS_IOS = /iPhone|iPad|iPod/i.test(UA) || (/Macintosh/i.test(UA) && navigator.maxTouchPoints > 1);
+  const IS_SAFARI = IS_IOS || /^((?!chrome|chromium|crios|fxios|edg|opr|android).)*safari/i.test(UA);
+  // Safari/iPhone only let the mic start from a tap: no quiet auto-restart there.
+  const NEEDS_TAP = IS_SAFARI;
+
   let recognition = null;
   let wanted = false;     // the visitor wants us listening
   let passed = false;
   let networkErrors = 0;
   let restartTimer = null;
+
+  function micOff() { gateMicIcon.classList.remove("is-listening"); }
 
   function passGate(transcript, viaVoice) {
     if (passed) return; // guard against double entry (voice result + stray click)
@@ -25,7 +33,7 @@
     wanted = false;
     clearTimeout(restartTimer);
     if (recognition) { try { recognition.abort(); } catch (e) { /* already stopped */ } }
-    gateMicIcon.classList.remove("is-listening");
+    micOff();
     window.unlockApp(transcript || "", !!viaVoice);
   }
 
@@ -42,6 +50,7 @@
   function beginListening() {
     if (!SpeechRecognitionCtor || wanted || passed) return;
     wanted = true;
+    gateError.hidden = true;
 
     recognition = new SpeechRecognitionCtor();
     recognition.lang = REC_LANG;
@@ -63,30 +72,41 @@
     };
 
     recognition.onerror = (event) => {
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      const err = event.error;
+      if (err === "not-allowed" || err === "service-not-allowed") {
         wanted = false;
-        gateMicIcon.classList.remove("is-listening");
+        micOff();
         gateError.hidden = false;
-        gateError.textContent = "Microphone permission was denied \u2014 you can still type below.";
+        gateError.textContent = IS_SAFARI
+          ? "Safari needs permission: allow the microphone for this site and turn on Dictation (System Settings \u2192 Keyboard). You can also just type below."
+          : "Microphone permission was denied \u2014 click the lock icon in the address bar to allow it, or type below.";
         gateStatus.textContent = "Type instead";
-      } else if (event.error === "network") {
+      } else if (err === "audio-capture") {
+        wanted = false;
+        micOff();
+        gateStatus.textContent = "No microphone found \u2014 type below to continue.";
+      } else if (err === "network") {
         networkErrors++;
-        if (networkErrors >= 3) {
-          wanted = false;
-          gateMicIcon.classList.remove("is-listening");
-          gateStatus.textContent = "Voice service unreachable \u2014 type below to continue.";
-        }
+        gateStatus.textContent = "The browser's speech service isn't reachable (Brave and some privacy settings block it) \u2014 type below, or try Chrome, Edge or Safari.";
+        if (networkErrors >= 3) { wanted = false; micOff(); }
       }
-      // "no-speech" / "aborted": onend fires next and we simply listen again.
+      // "no-speech" / "aborted": onend fires next.
     };
 
     recognition.onend = () => {
       if (wanted && !passed) {
+        if (NEEDS_TAP) {
+          // Safari/iPhone can't reopen the mic without another tap.
+          wanted = false;
+          micOff();
+          gateStatus.textContent = "Didn't catch that \u2014 tap anywhere and say \u201cHey MINIme\u201d";
+          return;
+        }
         // The browser closes the mic after a few quiet seconds. Quietly
         // reopen it so the visitor never has to tap twice.
         restartTimer = setTimeout(startRecognition, 250);
       } else {
-        gateMicIcon.classList.remove("is-listening");
+        micOff();
       }
     };
 
@@ -97,9 +117,9 @@
     gateStatus.textContent = "Voice isn't supported in this browser \u2014 type below to continue.";
   }
 
-  // First tap ANYWHERE on the gate starts listening \u2014 the click also happens
-  // to be exactly what satisfies the browser's requirement that microphone
-  // access starts from a real user gesture.
+  // First tap ANYWHERE on the gate starts listening. The tap is also exactly
+  // what browsers require before they allow microphone access (and, on
+  // Safari/iPhone, before they allow speech output).
   gateScreen.addEventListener("click", (e) => {
     if (gateTypeForm.contains(e.target)) return;
     beginListening();
